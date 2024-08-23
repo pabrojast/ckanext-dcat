@@ -558,16 +558,23 @@ class RDFProfile(object):
 
 
     def _search_values_codelist_add_to_graph(self, metadata_codelist, labels, dataset_dict, dataset_ref, dataset_tag_base, g, dcat_property):
-        # Create a dictionary with label as key and id as value for each element in metadata_codelist
+        # Crear un diccionario con label como clave e id como valor para cada elemento en metadata_codelist
         inspire_dict = {row['label'].lower(): row.get('id', row.get('value')) for row in metadata_codelist}
         
-        # Check if labels is a list, if not, convert it to a list
+        # Verificar si labels es una lista, si no, convertirlo en una lista
         if not isinstance(labels, list):
             labels = [labels]
         
+        # Obtener el valor de 'topic' del dataset_dict
+        topic_value = self._get_dataset_value(dataset_dict, 'topic')
+        
+        # Si topic_value es None, asignar una lista vacía para evitar errores
+        if topic_value is None:
+            topic_value = []
+        
         for label in labels:
-            if label not in self._get_dataset_value(dataset_dict, 'topic'):
-                # Check if tag_name is in inspire_dict
+            if label not in topic_value:
+                # Comprobar si tag_name está en inspire_dict
                 if label.lower() in inspire_dict:
                     tag_val = inspire_dict[label.lower()]
                 else:
