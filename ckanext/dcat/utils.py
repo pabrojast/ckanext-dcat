@@ -355,8 +355,18 @@ def dcat_json_page():
      }
 
      try:
-         datasets = toolkit.get_action('dcat_datasets_list')({},
+         user_name = (
+             toolkit.current_user.name
+             if hasattr(toolkit, "current_user")
+             else toolkit.g.user
+         )
+         context = {
+             'user': user_name,
+         }
+         datasets = toolkit.get_action('dcat_datasets_list')(context,
                                                              data_dict)
+     except toolkit.NotAuthorized:
+         return toolkit.abort(403)
      except toolkit.ValidationError as e:
          return toolkit.abort(409, str(e))
 
@@ -375,7 +385,15 @@ def read_dataset_page(_id, _format):
         _profiles = _profiles.split(',')
 
     try:
-        response = toolkit.get_action('dcat_dataset_show')({}, {'id': _id,
+        user_name = (
+            toolkit.current_user.name
+            if hasattr(toolkit, "current_user")
+            else toolkit.g.user
+        )
+        context = {
+            'user': user_name,
+        }
+        response = toolkit.get_action('dcat_dataset_show')(context, {'id': _id,
             'format': _format, 'profiles': _profiles})
     except toolkit.NotAuthorized:
         toolkit.abort(403)
@@ -411,7 +429,17 @@ def read_catalog_page(_format):
     }
 
     try:
-        response = toolkit.get_action('dcat_catalog_show')({}, data_dict)
+        user_name = (
+            toolkit.current_user.name
+            if hasattr(toolkit, "current_user")
+            else toolkit.g.user
+        )
+        context = {
+            'user': user_name,
+        }
+        response = toolkit.get_action('dcat_catalog_show')(context, data_dict)
+    except toolkit.NotAuthorized:
+        toolkit.abort(403)
     except (toolkit.ValidationError, RDFProfileException) as e:
         toolkit.abort(409, str(e))
 
