@@ -39,6 +39,11 @@ DEFAULT_CATALOG_ENDPOINT = '/catalog.{_format}'
 ENABLE_CONTENT_NEGOTIATION_CONFIG = 'ckanext.dcat.enable_content_negotiation'
 
 
+def get_endpoint(_type='dataset'):
+    """Get the endpoint name for a given type (dataset or catalog)"""
+    return 'dcat.read_dataset' if _type == 'dataset' else 'dcat.read_catalog'
+
+
 def _get_package_type(id):
     """
     Given the id of a package this method will return the type of the
