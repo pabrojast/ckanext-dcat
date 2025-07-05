@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
 
-from builtins import str
 import logging
 import uuid
 import simplejson as json
@@ -37,7 +36,6 @@ CONTENT_TYPES = {
 DCAT_CLEAN_TAGS = 'ckanext.dcat.clean_tags'
 
 DEFAULT_CATALOG_ENDPOINT = '/catalog.{_format}'
-ENABLE_RDF_ENDPOINTS_CONFIG = 'ckanext.dcat.enable_rdf_endpoints'
 ENABLE_CONTENT_NEGOTIATION_CONFIG = 'ckanext.dcat.enable_content_negotiation'
 
 
@@ -78,6 +76,13 @@ def field_labels():
         'publisher_email': _('Publisher email'),
         'publisher_url': _('Publisher URL'),
         'publisher_type': _('Publisher type'),
+        'publisher_identifier': _('Publisher identifier'),
+        'creator_uri': _('Creator URI'),
+        'creator_name': _('Creator name'),
+        'creator_email': _('Creator email'),
+        'creator_url': _('Creator URL'),
+        'creator_type': _('Creator type'),
+        'creator_identifier': _('Creator identifier'),
         'contact_name': _('Contact name'),
         'contact_email': _('Contact email'),
         'contact_uri': _('Contact URI'),
@@ -88,43 +93,6 @@ def field_labels():
         'created': _('Created'),
     }
 
-def helper_available(helper_name):
-    '''
-    Checks if a given helper name is available on `h`
-    '''
-    try:
-        getattr(h, helper_name)
-    except (AttributeError, HelperError):
-        return False
-    return True
-
-def structured_data(dataset_id, profiles=None, _format='jsonld'):
-    '''
-    Returns a string containing the structured data of the given
-    dataset id and using the given profiles (if no profiles are supplied
-    the default profiles are used).
-
-    This string can be used in the frontend.
-    '''
-    if not profiles:
-        profiles = ['schemaorg']
-
-    data = toolkit.get_action('dcat_dataset_show')(
-        {},
-        {
-            'id': dataset_id,
-            'profiles': profiles,
-            'format': _format,
-        }
-    )
-    # parse result again to prevent UnicodeDecodeError and add formatting
-    try:
-        json_data = json.loads(data)
-        return json.dumps(json_data, sort_keys=True,
-                          indent=4, separators=(',', ': '), cls=json.JSONEncoderForHTML)
-    except ValueError:
-        # result was not JSON, return anyway
-        return data
 
 def catalog_uri():
     '''
@@ -409,6 +377,8 @@ def read_dataset_page(_id, _format):
     try:
         response = toolkit.get_action('dcat_dataset_show')({}, {'id': _id,
             'format': _format, 'profiles': _profiles})
+    except toolkit.NotAuthorized:
+        toolkit.abort(403)
     except toolkit.ObjectNotFound:
         toolkit.abort(404)
     except (toolkit.ValidationError, RDFProfileException) as e:
@@ -450,15 +420,3 @@ def read_catalog_page(_format):
     response.headers['Content-type'] = CONTENT_TYPES[_format]
 
     return response
-
-
-def endpoints_enabled():
-    return toolkit.asbool(config.get(ENABLE_RDF_ENDPOINTS_CONFIG, True))
-
-
-def get_endpoint(_type='dataset'):
-    return 'dcat.read_dataset' if _type == 'dataset' else 'dcat.read_catalog'
-
-def get_langs():
-    language_priorities = config.get('ckan.locales_offered', '').split()
-    return language_priorities

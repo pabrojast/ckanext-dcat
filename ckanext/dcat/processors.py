@@ -1,7 +1,3 @@
-from __future__ import print_function
-
-from builtins import str
-from builtins import object
 import sys
 import argparse
 import xml
@@ -69,28 +65,63 @@ class RDFProcessor(object):
 
         These are registered on ``entry_points`` in setup.py, under the
         ``[ckan.rdf.profiles]`` group.
+
+        Returns a list of loaded profiles
         '''
         profiles = []
-        loaded_profiles_names = []
 
         for profile_name in profile_names:
             for profile in iter_entry_points(
                     group=RDF_PROFILES_ENTRY_POINT_GROUP,
                     name=profile_name):
-                profile_class = profile.load()
+                profile_class = profile.resolve()
                 # Set a reference to the profile name
                 profile_class.name = profile.name
                 profiles.append(profile_class)
-                loaded_profiles_names.append(profile.name)
-                break
-
-        unknown_profiles = set(profile_names) - set(loaded_profiles_names)
-        if unknown_profiles:
-            raise RDFProfileException(
-                'Unknown RDF profiles: {0}'.format(
-                    ', '.join(sorted(unknown_profiles))))
 
         return profiles
+
+    def _run_on_profiles(self, method_name, fallback=None, *args, **kwargs):
+        '''
+        Calls the same method on each profile
+
+        Profiles are called in the same order they are defined.
+
+        If a profile does not have the method, we move to the next one,
+        except if fallback is provided, in which case we call the fallback
+        method instead.
+
+        We finish when the first profile returns a value.
+
+        Returns the value from the first profile that returns something. This
+        can be None, so if profiles want to explicitly mark that they didn't
+        handle a particular call they should raise RDFProfileException.
+
+        '''
+        value = None
+        for profile_class in self._profiles:
+            profile = profile_class(self.g, self.compatibility_mode)
+            if hasattr(profile, method_name):
+                try:
+                    value = getattr(profile, method_name)(*args, **kwargs)
+                except RDFProfileException as e:
+                    # We expect profiles to raise this exception if they can't
+                    # handle a particular dataset for instance
+                    pass
+                if value is not None:
+                    break
+            else:
+                if fallback and hasattr(profile, fallback):
+                    try:
+                        value = getattr(profile, fallback)(*args, **kwargs)
+                    except RDFProfileException as e:
+                        # We expect profiles to raise this exception if they
+                        # can't handle a particular dataset for instance
+                        pass
+                    if value is not None:
+                        break
+
+        return value
 
 
 class RDFParser(RDFProcessor):
@@ -103,66 +134,40 @@ class RDFParser(RDFProcessor):
 
     def _datasets(self):
         '''
-        Generator that returns all DCAT datasets on the graph
+        Generator that returns CKAN datasets parsed from the RDF graph
 
-        Yields rdflib.term.URIRef objects that can be used on graph lookups
-        and queries
+        Each dataset is passed to all the loaded profiles before being
+        yielded, so it can be further modified by each one of them.
+
+        Returns a dataset dict that can be passed to eg `package_create`
+        or `package_update`
         '''
-        for dataset in self.g.subjects(RDF.type, DCAT.Dataset):
-            yield dataset
+        for dataset_ref in self._dataset_refs():
+            dataset_dict = {}
+            for profile_class in self._profiles:
+                profile = profile_class(self.g, self.compatibility_mode)
+                profile.parse_dataset(dataset_dict, dataset_ref)
 
-    def next_page(self):
+            yield dataset_dict
+
+    def _dataset_refs(self):
         '''
-        Returns the URL of the next page or None if there is no next page
-        '''
-        for pagination_node in self.g.subjects(RDF.type, HYDRA.PagedCollection):
-            # Try to find HYDRA.next first
-            for o in self.g.objects(pagination_node, HYDRA.next):
-                return str(o)
+        Returns a list of rdflib URIRefs that represent datasets in the graph
 
-            # If HYDRA.next is not found, try HYDRA.nextPage (deprecated)
-            for o in self.g.objects(pagination_node, HYDRA.nextPage):
-                return str(o)
-        return None
-
-    def parse(self, data, _format=None):
-        '''
-        Parses and RDF graph serialization and into the class graph
-
-        It calls the rdflib parse function with the provided data and format.
-
-        Data is a string with the serialized RDF graph (eg RDF/XML, N3
-        ... ). By default RF/XML is expected. The optional parameter _format
-        can be used to tell rdflib otherwise.
-
-        It raises a ``RDFParserException`` if there was some error during
-        the parsing.
-
-        Returns nothing.
+        Checks for datasets on the first profile that implements this method,
+        otherwise defaults to all DCAT datasets.
         '''
 
-        _format = url_to_rdflib_format(_format)
-        if not _format or _format == 'pretty-xml':
-            _format = 'xml'
+        refs = self._run_on_profiles(
+            'datasets',
+            fallback='_datasets',
+        )
 
-        try:
-            self.g.parse(data=data, format=_format)
-        # Apparently there is no single way of catching exceptions from all
-        # rdflib parsers at once, so if you use a new one and the parsing
-        # exceptions are not cached, add them here.
-        # PluginException indicates that an unknown format was passed.
-        except (SyntaxError, xml.sax.SAXParseException,
-                rdflib.plugin.PluginException, TypeError) as e:
+        if not refs:
+            # Get all DCAT datasets
+            refs = [d for d in self.g.subjects(RDF.type, DCAT.Dataset)]
 
-            raise RDFParserException(e)
-
-    def supported_formats(self):
-        '''
-        Returns a list of all formats supported by this processor.
-        '''
-        return sorted([plugin.name
-                       for plugin
-                       in rdflib.plugin.plugins(kind=rdflib.parser.Parser)])
+        return refs
 
     def datasets(self):
         '''
@@ -174,13 +179,55 @@ class RDFParser(RDFProcessor):
         Returns a dataset dict that can be passed to eg `package_create`
         or `package_update`
         '''
-        for dataset_ref in self._datasets():
-            dataset_dict = {}
-            for profile_class in self._profiles:
-                profile = profile_class(self.g, self.compatibility_mode)
-                profile.parse_dataset(dataset_dict, dataset_ref)
+        for dataset in self._datasets():
+            yield dataset
 
-            yield dataset_dict
+    def parse(self, data, _format=None):
+        '''
+        Parses and RDF graph from a string, a file-like object or a URL
+
+        It calls the rdflib parse function with the provided data and format.
+
+        Data is a string with the serialized RDF graph, a file-like object or
+        an URL.  If the data is an URL, the format can be guessed from
+        the content type.
+
+        _format is an optional string with the format that will be passed to
+        rdflib), eg: csv, n3, xml, ttl...
+
+        '''
+
+        # Workaround for https://github.com/RDFLib/rdflib/issues/1484
+        # Avoid interpreting strings like "N802" as numbers.
+        # Only to be used when strictly necessary as it introduces a serious
+        # performance penalty and makes float values like "5e-4" not being
+        # parsed correctly
+        if _format == 'csv':
+            from rdflib.plugins.parsers.notation3 import ParserError as N3ParserError
+            orig_function = rdflib.plugins.parsers.notation3.exponent_syntax
+
+            def exponent_syntax(self, argstr, i, res):
+                try:
+                    return orig_function(self, argstr, i, res)
+                except N3ParserError:
+                    return -1
+            rdflib.plugins.parsers.notation3.exponent_syntax = exponent_syntax
+
+        _format = url_to_rdflib_format(_format)
+        if _format == 'pretty-xml':
+            _format = 'xml'
+
+        try:
+            self.g.parse(data=data, format=_format)
+        # Apparently there is no single way of catching exceptions from all
+        # rdflib parsers.
+        except (SyntaxError,
+                xml.sax.SAXParseException,
+                rdflib.plugin.PluginException,
+                rdflib.parser.ParserError) as e:
+
+            raise RDFParserException(e)
+
 
 class RDFSerializer(RDFProcessor):
     '''
@@ -189,78 +236,50 @@ class RDFSerializer(RDFProcessor):
     Supports different profiles which are the ones that will generate
     the RDF graph.
     '''
-    def _add_pagination_triples(self, paging_info):
+
+    def _add_datasets_to_graph(self, dataset_dicts, catalog_ref):
         '''
-        Adds pagination triples to the graph using the paging info provided
+        Adds the given dataset dicts to the RDF graph, using the loaded
+        profiles
 
-        The pagination info dict can have the following keys:
-        `count`, `items_per_page`, `current`, `first`, `last`, `next` or
-        `previous`.
+        ``catalog_ref`` is an rdflib URIRef object that represents the
+        catalog
 
-        It uses members from the hydra:PagedCollection class
-
-        http://www.hydra-cg.com/spec/latest/core/
-
-        Returns the reference to the pagination info, which will be an rdflib
-        URIRef or BNode object.
+        Returns a list of rdflib URIRef objects that represent the added
+        datasets
         '''
-        self.g.bind('hydra', HYDRA)
+        if not isinstance(dataset_dicts, list):
+            dataset_dicts = [dataset_dicts]
 
-        if paging_info.get('current'):
-            pagination_ref = URIRef(paging_info['current'])
-        else:
-            pagination_ref = BNode()
-        self.g.add((pagination_ref, RDF.type, HYDRA.PagedCollection))
+        dataset_refs = []
+        for dataset_dict in dataset_dicts:
 
-        #  The predicates `nextPage`, `previousPage`, `firstPage`, `lastPage`
-        #  and `itemsPerPage` are deprecated and will be removed in the future
-        items = [
-            ('next', [HYDRA.nextPage, HYDRA.next]),
-            ('previous', [HYDRA.previousPage, HYDRA.previous]),
-            ('first', [HYDRA.firstPage, HYDRA.first]),
-            ('last', [HYDRA.lastPage, HYDRA.last]),
-            ('count', [HYDRA.totalItems]),
-            ('items_per_page', [HYDRA.itemsPerPage]),
-        ]
+            dataset_ref = URIRef(dataset_uri(dataset_dict))
 
-        for item in items:
-            key, predicates = item
-            if paging_info.get(key):
-                for predicate in predicates:
-                    self.g.add((pagination_ref, predicate,
-                                Literal(paging_info[key])))
+            for profile_class in self._profiles:
+                profile = profile_class(self.g, self.compatibility_mode)
+                profile.graph_from_dataset(dataset_dict, dataset_ref)
 
-        return pagination_ref
+            dataset_refs.append(dataset_ref)
 
-    def graph_from_dataset(self, dataset_dict):
+            if catalog_ref:
+                self.g.add((catalog_ref, DCAT.dataset, dataset_ref))
+
+        return dataset_refs
+
+    def _add_catalog_to_graph(self, catalog_ref=None, catalog_dict=None):
         '''
-        Given a CKAN dataset dict, creates a graph using the loaded profiles
+        Adds the catalog to the graph using the loaded profiles
 
-        The class RDFLib graph (accessible via `serializer.g`) will be updated
-        by the loaded profiles.
+        The class RDFProfile will be used by default if no profiles are
+        provided.
 
-        Returns the reference to the dataset, which will be an rdflib URIRef.
+        Returns the reference to the catalog, which can be used to add
+        datasets to it.
+
         '''
-
-        dataset_ref = URIRef(dataset_uri(dataset_dict))
-
-        for profile_class in self._profiles:
-            profile = profile_class(self.g, self.compatibility_mode)
-            profile.graph_from_dataset(dataset_dict, dataset_ref)
-
-        return dataset_ref
-
-    def graph_from_catalog(self, catalog_dict=None):
-        '''
-        Creates a graph for the catalog (CKAN site) using the loaded profiles
-
-        The class RDFLib graph (accessible via `serializer.g`) will be updated
-        by the loaded profiles.
-
-        Returns the reference to the catalog, which will be an rdflib URIRef.
-        '''
-
-        catalog_ref = URIRef(catalog_uri())
+        if not catalog_ref:
+            catalog_ref = URIRef(catalog_uri())
 
         for profile_class in self._profiles:
             profile = profile_class(self.g, self.compatibility_mode)
@@ -268,28 +287,45 @@ class RDFSerializer(RDFProcessor):
 
         return catalog_ref
 
+    def _add_pagination_to_graph(self, paging_info):
+        '''
+        Adds pagination triples to the graph using the loaded profiles
+
+        The pagination information dict can contain the following:
+
+        {
+            'count': 2,
+            'items_per_page': 1,
+            'current': 'http://example.com/catalog/1',
+            'first': 'http://example.com/catalog/1',
+            'last': 'http://example.com/catalog/2',
+            'next': 'http://example.com/catalog/2',
+            'previous': None,
+        }
+
+        '''
+
+        self._run_on_profiles(
+            'graph_from_catalog_pagination',
+            catalog_pagination=paging_info,
+        )
+
     def serialize_dataset(self, dataset_dict, _format='xml'):
         '''
         Given a CKAN dataset dict, returns an RDF serialization
 
         The serialization format can be defined using the `_format` parameter.
-        It must be one of the ones supported by RDFLib, defaults to `xml`.
+        It must be one of the ones supported by rdflib, defaults to `xml`.
 
-        Returns a string with the serialized dataset
+        Returns a string with the datasetd serialized in the requested format.
         '''
 
-        self.graph_from_dataset(dataset_dict)
-
-        if not _format:
-            _format = 'xml'
-        _format = url_to_rdflib_format(_format)
+        self._add_datasets_to_graph(dataset_dict, catalog_ref=None)
 
         if _format == 'json-ld':
-            output = self.g.serialize(format=_format, auto_compact=True)
-        else:
-            output = self.g.serialize(format=_format)
+            _format = 'json-ld'
 
-        return output
+        return self.g.serialize(format=_format)
 
     def serialize_catalog(self, catalog_dict=None, dataset_dicts=None,
                           _format='xml', pagination_info=None):
@@ -300,100 +336,32 @@ class RDFSerializer(RDFProcessor):
         like `title`, `homepage`, etc. If not provided these would get default
         values from the CKAN config (eg from `ckan.site_title`).
 
-        If passed a list of CKAN dataset dicts, these will be also serializsed
-        as part of the catalog.
-        **Note:** There is no hard limit on the number of datasets at this
-        level, this should be handled upstream.
+        If passed a list of CKAN dataset dicts, these will be also added to
+        the catalog.
 
         The serialization format can be defined using the `_format` parameter.
-        It must be one of the ones supported by RDFLib, defaults to `xml`.
+        It must be one of the ones supported by rdflib, defaults to `xml`.
 
         `pagination_info` may be a dict containing keys describing the results
-        pagination. See the `_add_pagination_triples()` method for details.
+        pagination. See the `_add_pagination_to_graph()` method for details.
 
-        Returns a string with the serialized catalog
+        Returns a string with the catalog serialized in the requested format.
+
         '''
 
-        catalog_ref = self.graph_from_catalog(catalog_dict)
-        if dataset_dicts:
-            for dataset_dict in dataset_dicts:
-                dataset_ref = self.graph_from_dataset(dataset_dict)
+        catalog_ref = self._add_catalog_to_graph(catalog_ref=None,
+                                                 catalog_dict=catalog_dict)
 
-                cat_ref = self._add_source_catalog(catalog_ref, dataset_dict, dataset_ref)
-                if not cat_ref:
-                    self.g.add((catalog_ref, DCAT.dataset, dataset_ref))
+        if dataset_dicts:
+            self._add_datasets_to_graph(dataset_dicts, catalog_ref)
 
         if pagination_info:
-            self._add_pagination_triples(pagination_info)
+            self._add_pagination_to_graph(pagination_info)
 
-        if not _format:
-            _format = 'xml'
-        _format = url_to_rdflib_format(_format)
-        output = self.g.serialize(format=_format)
+        if _format == 'json-ld':
+            _format = 'json-ld'
 
-        return output
-
-    def _add_source_catalog(self, root_catalog_ref, dataset_dict, dataset_ref):
-        if not p.toolkit.asbool(config.get(DCAT_EXPOSE_SUBCATALOGS, False)):
-            return
-
-        def _get_from_extra(key):
-            for ex in dataset_dict.get('extras', []):
-                if ex['key'] == key:
-                    return ex['value']
-
-        source_uri = _get_from_extra('source_catalog_homepage')
-        if not source_uri:
-            return
-
-        g = self.g
-        catalog_ref = URIRef(source_uri)
-
-        # we may have multiple subcatalogs, let's check if this one has been already added
-        if (root_catalog_ref, DCT.hasPart, catalog_ref) not in g:
-
-            g.add((root_catalog_ref, DCT.hasPart, catalog_ref))
-            g.add((catalog_ref, RDF.type, DCAT.Catalog))
-            g.add((catalog_ref, DCAT.dataset, dataset_ref))
-
-            sources = (('source_catalog_title', DCT.title, Literal,),
-                       ('source_catalog_description', DCT.description, Literal,),
-                       ('source_catalog_homepage', FOAF.homepage, URIRef,),
-                       ('source_catalog_language', DCT.language, Literal,),
-                       ('source_catalog_modified', DCT.modified, Literal,),)
-
-            # base catalog struct
-            for item in sources:
-                key, predicate, _type = item
-                value = _get_from_extra(key)
-                if value:
-                    g.add((catalog_ref, predicate, _type(value)))
-
-            publisher_sources = (
-                                 ('name', Literal, FOAF.name, True,),
-                                 ('email', Literal, FOAF.mbox, False,),
-                                 ('url', URIRef, FOAF.homepage,False,),
-                                 ('type', Literal, DCT.type, False,))
-
-            _pub = _get_from_extra('source_catalog_publisher')
-            if _pub:
-                pub = json.loads(_pub)
-
-                #pub_uri = URIRef(pub.get('uri'))
-
-                agent = BNode()
-                g.add((agent, RDF.type, FOAF.Agent))
-                g.add((catalog_ref, DCT.publisher, agent))
-
-                for src_key, _type, predicate, required in publisher_sources:
-                    val = pub.get(src_key)
-                    if val is None and required:
-                        raise ValueError("Value for %s (%s) is required" % (src_key, predicate))
-                    elif val is None:
-                        continue
-                    g.add((agent, predicate, _type(val)))
-
-        return catalog_ref
+        return self.g.serialize(format=_format)
 
 
 if __name__ == '__main__':
@@ -402,39 +370,50 @@ if __name__ == '__main__':
         description='DCAT RDF - CKAN operations')
     parser.add_argument('mode',
                         default='consume',
-                        help='''
-Operation mode.
-`consume` parses DCAT RDF graphs to CKAN dataset JSON objects.
-`produce` serializes CKAN dataset JSON objects into DCAT RDF.
+                        help='''Operation mode.
+                        `consume` parses DCAT RDF graphs to CKAN dataset JSON objects.
+                        `produce` serializes CKAN dataset JSON objects into DCAT RDF.
                         ''')
     parser.add_argument('file', nargs='?', type=argparse.FileType('r'),
                         default=sys.stdin,
                         help='Input file. If omitted will read from stdin')
     parser.add_argument('-f', '--format',
+                        dest='format',
                         default='xml',
                         help='''Serialization format (as understood by rdflib)
-                                eg: xml, n3 ... Defaults to \'xml\'.''')
+                        eg: xml, n3 ... Defaults to \'xml\'.''')
     parser.add_argument('-P', '--pretty',
+                        dest='pretty',
                         action='store_true',
                         help='Make the output more human readable')
     parser.add_argument('-p', '--profile', nargs='*',
                         action='store',
                         help='RDF Profiles to use, defaults to euro_dcat_ap_2')
     parser.add_argument('-m', '--compat-mode',
+                        dest='compat_mode',
                         action='store_true',
                         help='Enable compatibility mode')
 
-    parser.add_argument('-s', '--subcatalogs', action='store_true', dest='subcatalogs',
-                        default=False,
-                        help="Enable subcatalogs handling (dct:hasPart support)")
+    parser.add_argument('-s', '--subcatalogs',
+                        dest='subcatalogs',
+                        action='store_true',
+                        help='''Enable subcatalogs handling.
+                            This will store information about the origin catalog
+                            when consuming and serialize the datasets when producing.''')
+
     args = parser.parse_args()
+
+    if args.subcatalogs:
+        config[DCAT_EXPOSE_SUBCATALOGS] = True
 
     contents = args.file.read()
 
-    config.update({DCAT_EXPOSE_SUBCATALOGS: args.subcatalogs})
-
     if args.mode == 'produce':
-        serializer = RDFSerializer(profiles=args.profile,
+        if args.profile:
+            profiles = args.profile
+        else:
+            profiles = None
+        serializer = RDFSerializer(profiles=profiles,
                                    compatibility_mode=args.compat_mode)
 
         dataset = json.loads(contents)
