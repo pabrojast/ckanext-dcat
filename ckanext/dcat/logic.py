@@ -21,7 +21,12 @@ def dcat_dataset_show(context, data_dict):
 
     toolkit.check_access('dcat_dataset_show', context, data_dict)
 
-    dataset_dict = toolkit.get_action('package_show')(context, data_dict)
+    # Create a new context that ignores auth for package_show
+    # since DCAT endpoints should be publicly accessible
+    new_context = context.copy()
+    new_context['ignore_auth'] = True
+    
+    dataset_dict = toolkit.get_action('package_show')(new_context, data_dict)
 
     serializer = RDFSerializer(profiles=data_dict.get('profiles'))
 
@@ -117,7 +122,12 @@ def _search_ckan_datasets(context, data_dict):
         search_data_dict['fq_list'].append(
             'metadata_modified:[{0} TO NOW]'.format(modified_since))
 
-    query = toolkit.get_action('package_search')(context, search_data_dict)
+    # Create a new context that ignores auth for package_search
+    # since DCAT endpoints should be publicly accessible
+    new_context = context.copy()
+    new_context['ignore_auth'] = True
+    
+    query = toolkit.get_action('package_search')(new_context, search_data_dict)
 
     return query
 

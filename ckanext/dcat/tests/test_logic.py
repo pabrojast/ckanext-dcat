@@ -67,6 +67,35 @@ def test_dataset_show_without_format():
     assert dcat_dataset['notes'] == dataset['notes']
 
 
+@pytest.mark.usefixtures('with_plugins', 'clean_db')
+def test_dataset_show_with_private_dataset():
+    """Test that private datasets can be accessed through DCAT endpoints"""
+    user = factories.User()
+    dataset = factories.Dataset(
+        notes='Test private dataset',
+        private=True,
+        user=user
+    )
+
+    # This should work even though the dataset is private
+    # because DCAT endpoints should be publicly accessible
+    content = helpers.call_action('dcat_dataset_show', id=dataset['id'], _format='xml')
+
+    # Parse the contents to check it's an actual serialization
+    p = RDFParser()
+
+    p.parse(content, _format='xml')
+
+    dcat_datasets = [d for d in p.datasets()]
+
+    assert len(dcat_datasets) == 1
+
+    dcat_dataset = dcat_datasets[0]
+
+    assert dcat_dataset['title'] == dataset['title']
+    assert dcat_dataset['notes'] == dataset['notes']
+
+
 # Pagination
 
 @pytest.mark.usefixtures("with_request_context")
