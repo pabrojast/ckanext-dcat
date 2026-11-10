@@ -1232,19 +1232,45 @@ class RDFProfile(object):
             roots = list(self.g.subjects(RDF.type, DCAT.Catalog))
         return roots[0]
 
+    def _get_spatial_uris(self, dataset_dict):
+        '''
+        Returns the `spatial_uri` values as a list of strings.
+
+        `spatial_uri` can be a single URI or, with a multiple choice scheming
+        field, a list of URIs (or its JSON encoding).
+        '''
+        value = self._get_dataset_value(dataset_dict, 'spatial_uri')
+        if not value:
+            return []
+        if isinstance(value, basestring) and not value.strip().startswith('['):
+            # A single URI, kept whole even if it contains commas
+            return [value.strip()]
+        items = self._read_list_value(value)
+        if isinstance(items, basestring):
+            items = [items]
+        return [item.strip() for item in items
+                if isinstance(item, basestring) and item.strip()]
+
     def _get_or_create_spatial_ref(self, dataset_dict, dataset_ref):
+        spatial_uris = self._get_spatial_uris(dataset_dict)
+        # With several URIs, each one is a dct:spatial of its own and the
+        # geometry goes on a blank node, which is the ref returned here.
+        extra_refs = set(CleanedURIRef(uri) for uri in spatial_uris) if len(spatial_uris) > 1 else set()
+
         for spatial_ref in self.g.objects(dataset_ref, DCT.spatial):
-            if spatial_ref:
+            if spatial_ref and spatial_ref not in extra_refs:
                 return spatial_ref
 
         # Create new spatial_ref
-        spatial_uri = self._get_dataset_value(dataset_dict, 'spatial_uri')
-        if spatial_uri:
-            spatial_ref = CleanedURIRef(spatial_uri)
+        if len(spatial_uris) == 1:
+            spatial_ref = CleanedURIRef(spatial_uris[0])
         else:
             spatial_ref = BNode()
         self.g.add((spatial_ref, RDF.type, DCT.Location))
         self.g.add((dataset_ref, DCT.spatial, spatial_ref))
+        for extra_ref in extra_refs:
+            self.g.add((extra_ref, RDF.type, DCT.Location))
+            self.g.add((dataset_ref, DCT.spatial, extra_ref))
         return spatial_ref
 
     # Public methods for profiles to implement
@@ -2950,15 +2976,17 @@ class SchemaOrgProfile(RDFProfile):
                 self._add_date_triple(dataset_ref, SCHEMA.temporalCoverage, end)
 
     def _spatial_graph(self, dataset_ref, dataset_dict):
-        spatial_uri = self._get_dataset_value(dataset_dict, 'spatial_uri')
+        spatial_uris = self._get_spatial_uris(dataset_dict)
         spatial_text = self._get_dataset_value(dataset_dict, 'spatial_text')
         spatial_geom = self._get_dataset_value(dataset_dict, 'spatial')
 
-        if spatial_uri or spatial_text or spatial_geom:
-            if spatial_uri:
-                spatial_ref = URIRef(spatial_uri)
+        if spatial_uris or spatial_text or spatial_geom:
+            if len(spatial_uris) == 1:
+                spatial_ref = URIRef(spatial_uris[0])
             else:
                 spatial_ref = BNode()
+                for uri in spatial_uris:
+                    self.g.add((dataset_ref, SCHEMA.spatialCoverage, URIRef(uri)))
 
             self.g.add((spatial_ref, RDF.type, SCHEMA.Place))
             self.g.add((dataset_ref, SCHEMA.spatialCoverage, spatial_ref))

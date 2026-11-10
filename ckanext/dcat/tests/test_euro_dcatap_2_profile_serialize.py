@@ -204,6 +204,32 @@ class TestEuroDCATAP2ProfileSerializeDataset(BaseSerializeTest):
         wkt_cent = wkt.dumps(json.loads(extras['spatial_centroid']), decimals=4)
         assert self._triple(g, spatial, DCAT.centroid, wkt_cent, GSP.wktLiteral)
 
+    @pytest.mark.parametrize('as_json', [True, False])
+    def test_spatial_several_uris(self, as_json):
+        # A multiple choice scheming field stores a list of URIs
+        uris = ['http://publications.europa.eu/resource/authority/country/AND',
+                'http://publications.europa.eu/resource/authority/country/ARE']
+        dataset = {
+            'id': '4b6fe9ca-dc77-4cec-92a4-55c6624a5bd6',
+            'name': 'test-dataset',
+            'spatial_uri': json.dumps(uris) if as_json else uris,
+            'spatial_bbox': '{"type": "Polygon", "coordinates": [[[2.18,42.07],[2.18,42.16],[2.37,42.16],[2.37,42.07],[2.18,42.07]]]}',
+        }
+
+        s = RDFSerializer(profiles=DCAT_AP_PROFILES)
+        g = s.g
+
+        dataset_ref = s.graph_from_dataset(dataset)
+
+        spatial = list(g.objects(dataset_ref, DCT.spatial))
+        assert sorted(str(o) for o in spatial if isinstance(o, URIRef)) == uris
+        blank = [o for o in spatial if isinstance(o, BNode)]
+        assert len(blank) == 1
+        assert self._triple(g, blank[0], RDF.type, DCT.Location)
+        assert self._triple(g, blank[0], DCAT.bbox, None)
+        # Turtle used to fail with the whole list as a single URI
+        assert 'country/ARE' in g.serialize(format='turtle')
+
     def test_spatial_bad_geojson_no_wkt(self):
         dataset = {
             'id': '4b6fe9ca-dc77-4cec-92a4-55c6624a5bd6',
